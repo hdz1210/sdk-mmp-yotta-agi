@@ -20,7 +20,7 @@ Thêm vào `pubspec.yaml`:
 dependencies:
   mmp_sdk_flutter:
     git:
-      url: https://github.com/your-org/mmp_sdk_flutter.git
+      url: https://github.com/hdz1210/sdk-mmp-yotta-agi.git
       ref: main
 ```
 
