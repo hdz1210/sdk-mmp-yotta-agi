@@ -211,70 +211,45 @@ final GoRouter appRouter = GoRouter(
 );
 ```
 
-**B3. Xử lý Deep Link tại HomeScreen (Cực kỳ quan trọng)**
+**B3. Gọi `enableAutoPopup` tại Root Widget (khuyên dùng)**
 
-Trong `HomeScreen` của bạn, sử dụng `onDeepLinkReceived` và `consumePendingNavigation` (thay vì `enableAutoPopup`), kết hợp với cơ chế chống double-trigger.
+Để tích hợp cực kỳ gọn lẹ mà không cần viết code lằng nhằng ở HomeScreen, bạn hãy biến Root Widget của app (VD: `MyApp`) thành một **StatefulWidget** và gọi popup ngay trong `initState`:
 
 ```dart
-// lib/screens/home_screen.dart
-class _HomeScreenState extends State<HomeScreen> {
-  String? _lastHandledSignature; // Biến chống double-trigger
+// lib/main.dart
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
+class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
-    _setupDeepLink();
-  }
-
-  void _setupDeepLink() {
-    // 1. Phục hồi deep link pending (Cold Start)
-    MMPSdk.consumePendingNavigation().then((data) {
-      if (data != null) _handleDeepLink(data);
-    });
-
-    // 2. Lắng nghe deep link stream (Hot/Warm Start)
-    MMPSdk.onDeepLinkReceived((data) {
-      _handleDeepLink(data);
+    
+    // Bật AutoPopup và truyền callback onData để tự đẩy trang đích bằng GoRouter
+    MMPSdk.enableAutoPopup(rootNavigatorKey, onData: (data) {
+      if (rootNavigatorKey.currentContext != null && data.targetScreen != null) {
+        GoRouter.of(rootNavigatorKey.currentContext!).push(
+          data.targetScreen!, 
+          extra: data.queryParams
+        );
+      }
     });
   }
-
-  void _handleDeepLink(MMPDeeplinkData data) {
-    // A. Chống xử lý 2 lần liên tiếp cùng 1 link
-    final signature = '${data.slug}_${data.targetScreen}';
-    if (_lastHandledSignature == signature) return;
-    _lastHandledSignature = signature;
-
-    // B. Điều hướng bằng go_router (Dùng context của widget -> Nút Back hoạt động)
-    if (data.targetScreen != null && data.targetScreen!.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) context.push(data.targetScreen!, extra: data.queryParams);
-      });
-    }
-
-    // C. Hiện popup bằng context của widget (Chậm lại 1 nhịp để route kịp push)
-    Future.delayed(const Duration(milliseconds: 600), () {
-      if (mounted) MMPAttributionPopup.show(context, data);
-    });
-  }
-}
-```
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(body: Center(child: Text('Home')));
+    return MaterialApp.router(
+      routerConfig: appRouter, // Nhớ gắn rootNavigatorKey vào appRouter
+    );
   }
 }
 ```
-
-**Tại sao phải làm khác?**
-
-| | Navigator 1.0 | Navigator 2.0 (go_router) |
-|---|---|---|
-| **Widget gốc** | `MaterialApp(navigatorKey: ...)` | `MaterialApp.router(routerConfig: ...)` |
-| **Đăng ký route** | `onGenerateRoute` | `GoRouter(routes: [...])` |
-| **Điều hướng** | `Navigator.pushNamed('/path')` | `context.push('/path')` / `GoRouter.of(ctx).push(...)` |
-| **SDK `pushNamed()` hoạt động?** | ✅ Có | ❌ Không — route không được đăng ký với Navigator mặc định |
-| **SDK popup hoạt động?** | ✅ Có (qua `navigatorKey.currentContext`) | ✅ Có (qua `navigatorKey.currentContext`) |
 
 ---
 
@@ -459,3 +434,7 @@ Host App
 ### ❌ Deep link không nhận được gì
 **Nguyên nhân:** SHA256 fingerprint trên Admin Panel không khớp với signing key của APK
 **Fix:** Chạy `keytool -list -v -keystore ~/.android/debug.keystore` và cập nhật SHA256 trên Admin Panel
+
+### ❌ Dùng GoRouter nhưng không hiện Popup, click link ra thẳng màn hình cụt (không có nút Back)
+**Nguyên nhân:** Khác với Navigator 1.0, `GoRouter` sẽ tự động "nẫng tay trên" Deep Link của hệ điều hành và đẩy thẳng user vào màn hình đích trước cả khi SDK kịp chạy. Khi đó, user bị kẹt ở "màn hình ma" không có lịch sử (stack), bấm Back là văng app.
+**Fix:** **BẤT DI BẤT DỊCH** phải cấu hình thuộc tính `redirect` trong instance của GoRouter. Khi thấy URI chứa `host` của MMP hoặc có các params như `utm_source`, `slug`..., phải ép nó `return '/';` (nhường quyền lại cho màn hình gốc khởi tạo SDK và gọi Popup). Chi tiết xem lại **Bước B2 của Cách 1B**.
