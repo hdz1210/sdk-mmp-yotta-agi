@@ -6,14 +6,21 @@ import 'mmp_deeplink_data.dart';
 /// Shows a beautiful dialog with deep link attribution info
 /// when the app is opened via a tracked link.
 class MMPAttributionPopup {
-  /// Show the attribution popup dialog.
-  /// Call this inside your [MMPSdk.onDeepLinkReceived] callback.
+  /// Show the attribution popup dialog using showDialog.
+  /// Works with Navigator 1.0 (requires valid BuildContext with Navigator ancestor).
   static void show(BuildContext context, MMPDeeplinkData data) {
     showDialog(
       context: context,
       barrierDismissible: true,
       builder: (ctx) => _AttributionDialog(data: data),
     );
+  }
+
+  /// Returns the dialog widget directly.
+  /// Use with `navigator.push(DialogRoute(builder: (_) => buildDialog(data)))`.
+  /// Works with both Navigator 1.0 and 2.0 (go_router).
+  static Widget buildDialog(MMPDeeplinkData data) {
+    return _AttributionDialog(data: data);
   }
 }
 

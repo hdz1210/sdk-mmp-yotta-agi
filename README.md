@@ -90,18 +90,34 @@ dependencies:
 
 ## Sử dụng
 
-### Cách 1: Auto Popup (Khuyến nghị) ⭐
+> ⚠️ **QUAN TRỌNG: Navigator 1.0 vs Navigator 2.0 (go_router)**
+>
+> Cả 2 đều dùng `enableAutoPopup()`. Khác biệt duy nhất: Navigator 2.0 cần thêm `onData` callback để tự điều hướng bằng `GoRouter.of(ctx).push()` vì `pushNamed()` bên trong SDK chỉ hoạt động với Navigator 1.0.
+
+| Cấu hình app | Dùng cách nào? |
+|---|---|
+| `MaterialApp` + `onGenerateRoute` (Navigator 1.0) | ✅ **Cách 1A: Auto Popup** |
+| `MaterialApp.router` + `go_router` (Navigator 2.0) | ✅ **Cách 1B: Auto Popup + onData** |
+| App có màn Đăng Nhập (Auth Wall) | ✅ **Cách 2** |
+
+---
+
+### Cách 1A: Auto Popup — Navigator 1.0 (MaterialApp) ⭐
+
+> Chỉ dành cho app dùng `MaterialApp` + `onGenerateRoute` (Navigator 1.0 truyền thống).
 
 Chỉ cần **2 dòng code**. SDK tự xử lý: popup + điều hướng + cold/warm/hot start.
 
 ```dart
 import 'package:mmp_sdk_flutter/mmp_sdk_flutter.dart';
 
+// ① Khai báo navigatorKey ở GLOBAL SCOPE
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ② Khởi tạo SDK
   await MMPSdk.initialize(
     config: const MMPConfig(
       appKey: 'your-app-key-from-admin-panel',
@@ -117,11 +133,15 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      // ③ GẮN navigatorKey vào MaterialApp
       navigatorKey: navigatorKey,
       onGenerateRoute: (settings) {
-        // Định nghĩa routing cho app
+        // ④ Định nghĩa routing cho app (Navigator 1.0)
         if (settings.name == '/product') {
           return MaterialPageRoute(builder: (_) => ProductScreen());
+        }
+        if (settings.name == '/super-sale') {
+          return MaterialPageRoute(builder: (_) => SuperSaleScreen());
         }
         return MaterialPageRoute(builder: (_) => HomeScreen());
       },
@@ -129,22 +149,134 @@ class MyApp extends StatelessWidget {
   }
 }
 
+class HomeScreen extends StatefulWidget {
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
 class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // ✅ CHỈ CẦN 1 DÒNG NÀY — SDK lo tất cả!
+    // ⑤ CHỈ CẦN 1 DÒNG NÀY — SDK lo tất cả!
     MMPSdk.enableAutoPopup(navigatorKey);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(body: Center(child: Text('Home')));
   }
 }
 ```
 
-**SDK tự động:**
-- 📱 Navigate tới `targetScreen` (ví dụ: `/product`, `/super-sale`)
-- 🎯 Hiện popup attribution (Source, Campaign, Slug, Referral Code)
-- ❄️ Cold start: Buffer link → replay khi widget sẵn sàng
-- 🔥 Warm start: Lifecycle observer → re-check link khi app resumed
-- ⚡ Hot start: Stream listener → xử lý real-time
+**Tại sao hoạt động?** SDK gọi `navigatorKey.currentState!.pushNamed(targetScreen)` bên trong → Navigator 1.0 tìm route qua `onGenerateRoute` → điều hướng đúng.
+
+---
+
+### Cách 1B: Tích hợp chuẩn cho Navigator 2.0 (`go_router`) ⭐
+
+> `go_router` quản lý Navigator độc lập, do đó SDK **không thể** tự động push route hay hiện popup từ global context.  
+> Để tích hợp hoàn hảo với `go_router` (popup hiển thị đúng, nút Back hoạt động), bạn làm theo 3 bước sau:
+
+**B1. Khởi tạo SDK như bình thường:**
+
+```dart
+// lib/main.dart
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await MMPSdk.initialize(config: const MMPConfig(...));
+  runApp(const MyApp());
+}
+```
+
+**B2. Bắt buộc: Chặn URI Deep Link bằng `redirect` trong GoRouter**
+> Nếu không có bước này, hệ điều hành sẽ mở thẳng màn hình đích → tạo ra "màn hình ma" (không có nút Back, không hiện được popup).
+
+```dart
+// lib/router/app_router.dart
+final GoRouter appRouter = GoRouter(
+  initialLocation: '/',
+  // Chặn GoRouter tự navigate khi app mở từ deep link
+  redirect: (context, state) {
+    final params = state.uri.queryParameters;
+    // Nếu có query của MMP -> Ép về Home ('/') để HomeScreen khởi tạo SDK
+    if (params.containsKey('utm_source') || 
+        params.containsKey('slug') || 
+        state.uri.host.contains('mmp.omnigen.cloud')) {
+      return '/';
+    }
+    return null;
+  },
+  routes: [ /* ... */ ],
+);
+```
+
+**B3. Xử lý Deep Link tại HomeScreen (Cực kỳ quan trọng)**
+
+Trong `HomeScreen` của bạn, sử dụng `onDeepLinkReceived` và `consumePendingNavigation` (thay vì `enableAutoPopup`), kết hợp với cơ chế chống double-trigger.
+
+```dart
+// lib/screens/home_screen.dart
+class _HomeScreenState extends State<HomeScreen> {
+  String? _lastHandledSignature; // Biến chống double-trigger
+
+  @override
+  void initState() {
+    super.initState();
+    _setupDeepLink();
+  }
+
+  void _setupDeepLink() {
+    // 1. Phục hồi deep link pending (Cold Start)
+    MMPSdk.consumePendingNavigation().then((data) {
+      if (data != null) _handleDeepLink(data);
+    });
+
+    // 2. Lắng nghe deep link stream (Hot/Warm Start)
+    MMPSdk.onDeepLinkReceived((data) {
+      _handleDeepLink(data);
+    });
+  }
+
+  void _handleDeepLink(MMPDeeplinkData data) {
+    // A. Chống xử lý 2 lần liên tiếp cùng 1 link
+    final signature = '${data.slug}_${data.targetScreen}';
+    if (_lastHandledSignature == signature) return;
+    _lastHandledSignature = signature;
+
+    // B. Điều hướng bằng go_router (Dùng context của widget -> Nút Back hoạt động)
+    if (data.targetScreen != null && data.targetScreen!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) context.push(data.targetScreen!, extra: data.queryParams);
+      });
+    }
+
+    // C. Hiện popup bằng context của widget (Chậm lại 1 nhịp để route kịp push)
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted) MMPAttributionPopup.show(context, data);
+    });
+  }
+}
+```
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(body: Center(child: Text('Home')));
+  }
+}
+```
+
+**Tại sao phải làm khác?**
+
+| | Navigator 1.0 | Navigator 2.0 (go_router) |
+|---|---|---|
+| **Widget gốc** | `MaterialApp(navigatorKey: ...)` | `MaterialApp.router(routerConfig: ...)` |
+| **Đăng ký route** | `onGenerateRoute` | `GoRouter(routes: [...])` |
+| **Điều hướng** | `Navigator.pushNamed('/path')` | `context.push('/path')` / `GoRouter.of(ctx).push(...)` |
+| **SDK `pushNamed()` hoạt động?** | ✅ Có | ❌ Không — route không được đăng ký với Navigator mặc định |
+| **SDK popup hoạt động?** | ✅ Có (qua `navigatorKey.currentContext`) | ✅ Có (qua `navigatorKey.currentContext`) |
+
+---
 
 ### Cách 2: App có màn hình Đăng Nhập (Auth Wall) 🔒
 
@@ -167,6 +299,8 @@ class _LoginScreenState extends State<LoginScreen> {
 ```
 
 **B2. Tự động phục hồi Deep Link ở HomeScreen:**
+
+**Navigator 1.0:**
 ```dart
 class _HomeScreenState extends State<HomeScreen> {
   @override
@@ -178,13 +312,50 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 ```
+
+**Navigator 2.0 (go_router):**
+```dart
+class _HomeScreenState extends State<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Dùng consumePendingNavigation + manual navigation
+    _recoverPendingLink();
+  }
+
+  Future<void> _recoverPendingLink() async {
+    final data = await MMPSdk.consumePendingNavigation();
+    if (data != null && data.targetScreen != null) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        GoRouter.of(ctx).push(data.targetScreen!, extra: data.queryParams);
+        Future.delayed(const Duration(milliseconds: 300), () {
+          final popupCtx = navigatorKey.currentContext;
+          if (popupCtx != null) MMPAttributionPopup.show(popupCtx, data);
+        });
+      }
+    }
+    // Bật listener cho các link mới
+    MMPSdk.onDeepLinkReceived((data) {
+      if (data.targetScreen != null) {
+        final ctx = navigatorKey.currentContext;
+        if (ctx != null) GoRouter.of(ctx).push(data.targetScreen!, extra: data.queryParams);
+      }
+      Future.delayed(const Duration(milliseconds: 300), () {
+        final ctx = navigatorKey.currentContext;
+        if (ctx != null) MMPAttributionPopup.show(ctx, data);
+      });
+    });
+  }
+}
+```
 *Lưu ý: Dữ liệu được lưu an toàn trong SharedPreferences. Ngay cả khi người dùng bực mình tắt hẳn App (Force Quit) ở màn hình Login, thì ngày hôm sau họ mở lại App rồi Login, màn hình đích (targetScreen) vẫn sẽ bung ra như chưa hề có cuộc chia ly!*
 
 ---
 
 ### Cách 3: Manual Callback (Tùy chỉnh cao)
 
-Nếu muốn tự xử lý logic:
+Nếu muốn tự xử lý logic hoàn toàn:
 
 ```dart
 MMPSdk.onDeepLinkReceived((MMPDeeplinkData data) {
@@ -196,15 +367,45 @@ MMPSdk.onDeepLinkReceived((MMPDeeplinkData data) {
   // Tự hiện popup nếu muốn
   MMPAttributionPopup.show(context, data);
 
-  // Tự điều hướng
-  if (data.targetScreen != null) {
-    navigatorKey.currentState?.pushNamed(
-      data.targetScreen!,
-      arguments: data.queryParams,
-    );
-  }
+  // Tự điều hướng — chọn 1 trong 2:
+  // Navigator 1.0:
+  navigatorKey.currentState?.pushNamed(
+    data.targetScreen!,
+    arguments: data.queryParams,
+  );
+
+  // Navigator 2.0 (go_router):
+  // GoRouter.of(navigatorKey.currentContext!).push(
+  //   data.targetScreen!,
+  //   extra: data.queryParams,
+  // );
 });
 ```
+
+---
+
+## Tóm tắt: Cần sửa file nào?
+
+### Navigator 1.0 (`MaterialApp` + `onGenerateRoute`)
+
+| # | File | Thay đổi |
+|---|---|---|
+| 1 | `pubspec.yaml` | Thêm dependency `mmp_sdk_flutter` (git) |
+| 2 | `android/app/src/main/AndroidManifest.xml` | `launchMode="singleTask"`, xóa `taskAffinity=""`, thêm intent-filter App Links |
+| 3 | `lib/main.dart` | Khai báo `navigatorKey` global, gọi `MMPSdk.initialize()`, gắn `navigatorKey` vào `MaterialApp` |
+| 4 | `lib/<home_screen>.dart` | Gọi `MMPSdk.enableAutoPopup(navigatorKey)` trong `initState()` |
+
+### Navigator 2.0 (`MaterialApp.router` + `go_router`)
+
+| # | File | Thay đổi |
+|---|---|---|
+| 1 | `pubspec.yaml` | Thêm dependency `mmp_sdk_flutter` (git) |
+| 2 | `android/app/src/main/AndroidManifest.xml` | `launchMode="singleTask"`, xóa `taskAffinity=""`, thêm intent-filter App Links |
+| 3 | `lib/main.dart` | Khai báo `navigatorKey` global, gọi `MMPSdk.initialize()` |
+| 4 | `lib/router/app_router.dart` | Gắn `navigatorKey` vào `GoRouter(navigatorKey: navigatorKey)` |
+| 5 | `lib/<home_screen>.dart` | Dùng `MMPSdk.enableAutoPopup(navigatorKey, onData: ...)` + `GoRouter.of(ctx).push()` |
+
+> 💡 **Tip:** Navigator 1.0 = 4 file, Navigator 2.0 = 5 file (thêm `app_router.dart` vì `navigatorKey` phải gắn vào `GoRouter`)
 
 ---
 

@@ -199,10 +199,20 @@ class MMPSdk {
   /// Just call this once after initialize and the SDK handles everything.
   /// Works for cold start (app tắt hoàn toàn) and hot start (app đang mở).
   ///
-  /// Usage:
+  /// [onData] — Optional callback for custom navigation (e.g. go_router).
+  /// When provided, SDK delegates navigation to this callback instead of
+  /// calling `pushNamed()`. Popup is always shown by SDK regardless.
+  ///
+  /// Navigator 1.0 (MaterialApp):
   /// ```dart
-  /// final navigatorKey = GlobalKey<NavigatorState>();
   /// MMPSdk.enableAutoPopup(navigatorKey);
+  /// ```
+  ///
+  /// Navigator 2.0 (go_router):
+  /// ```dart
+  /// MMPSdk.enableAutoPopup(navigatorKey, onData: (data) {
+  ///   GoRouter.of(navigatorKey.currentContext!).push(data.targetScreen!);
+  /// });
   /// ```
   static String? _recentLinkSignature;
   static DateTime? _recentLinkTime;
@@ -234,24 +244,38 @@ class MMPSdk {
         prefs.remove('mmp_pending_navigation');
       });
 
-      // 1. Navigate to target screen FIRST
+      // 1. Navigate to target screen
       if (data.targetScreen != null && data.targetScreen!.isNotEmpty) {
-        navigatorKey.currentState?.pushNamed(
-          data.targetScreen!,
-          arguments: data.queryParams,
-        );
+        if (onData != null) {
+          // Delegate navigation to the host app (supports go_router / Navigator 2.0)
+          onData.call(data);
+        } else {
+          // Default: use Navigator 1.0 pushNamed
+          navigatorKey.currentState?.pushNamed(
+            data.targetScreen!,
+            arguments: data.queryParams,
+          );
+        }
+      } else {
+        // No target screen — still notify onData if provided
+        onData?.call(data);
       }
 
       // 2. Show popup AFTER navigation
-      Future.delayed(const Duration(milliseconds: 300), () {
-        final context = navigatorKey.currentContext;
-        if (context != null) {
-          MMPAttributionPopup.show(context, data);
+      Future.delayed(const Duration(milliseconds: 500), () {
+        final navigator = navigatorKey.currentState;
+        if (navigator != null && navigator.mounted) {
+          // Push DialogRoute directly onto the navigator — bypasses
+          // showDialog's context ancestry lookup which fails with go_router.
+          navigator.push(
+            DialogRoute(
+              context: navigator.context,
+              barrierDismissible: true,
+              builder: (_) => MMPAttributionPopup.buildDialog(data),
+            ),
+          );
         }
       });
-
-      // Call optional extra callback
-      onData?.call(data);
     });
 
     // Only recover from Storage if we DID NOT just replay from RAM
@@ -275,7 +299,7 @@ class MMPSdk {
       final Uri? uri = await _appLinks.getInitialAppLink();
       if (uri != null) {
         _log('Cold start direct link: $uri');
-        _handleDirectLink(uri);
+        await _handleDirectLink(uri);
         return true;
       }
     } catch (e) {
